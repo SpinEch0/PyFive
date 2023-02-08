@@ -4,7 +4,7 @@ from pyfive import cpu
 
 def main(argv: List[str] = None) -> int:
     emu = cpu.Cpu()
-    emu._bus.load_data("fib.bin")
+    emu.bus.load_data("csr.bin")
     emu.run()
 
 if __name__ == "__main__":
