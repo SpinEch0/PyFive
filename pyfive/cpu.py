@@ -1,54 +1,61 @@
 from pyfive import bus
+from pyfive import trap
+
 import numpy as np
-import types
 
-consts = types.SimpleNamespace()
+from enum import Enum
 
-# Machine-level CSRs.
-# Hardware thread ID.
-consts.MHARTID = 0xf14
-# Machine status register.
-consts.MSTATUS = 0x300
-# Machine exception delefation register.
-consts.MEDELEG = 0x302
-# Machine interrupt delefation register.
-consts.MIDELEG = 0x303
-# Machine interrupt-enable register.
-consts.MIE = 0x304
-# Machine trap-handler base address.
-consts.MTVEC = 0x305
-# Machine counter enable.
-consts.MCOUNTEREN = 0x306
-# Scratch register for machine trap handlers.
-consts.MSCRATCH = 0x340
-# Machine exception program counter.
-consts.MEPC = 0x341
-# Machine trap cause.
-consts.MCAUSE = 0x342
-# Machine bad address or instruction.
-consts.MTVAL = 0x343
-# Machine interrupt pending.
-consts.MIP = 0x344
+class MODE(Enum):
+    USER = 0b00
+    SUPERVISOR = 0b01
+    MACHINE = 0b11
 
-# Supervisor-level CSRs.
-# Supervisor status register.
-consts.SSTATUS = 0x100
-# Supervisor interrupt-enable register.
-consts.SIE = 0x104
-# Supervisor trap handler base address.
-consts.STVEC = 0x105
-# Scratch register for supervisor trap handlers.
-consts.SSCRATCH = 0x140
-# Supervisor exception program counter.
-consts.SEPC = 0x141
-# Supervisor trap cause.
-consts.SCAUSE = 0x142
-# Supervisor bad address or instruction.
-consts.STVAL = 0x143
-# Supervisor interrupt pending.
-consts.SIP = 0x144
-# Supervisor address translation and protection.
-consts.SATP = 0x180
+class CSR(Enum):
+    # Machine-level CSRs.
+    # Hardware thread ID.
+    MHARTID = 0xf14
+    # Machine status register.
+    MSTATUS = 0x300
+    # Machine exception delefation register.
+    MEDELEG = 0x302
+    # Machine interrupt delefation register.
+    MIDELEG = 0x303
+    # Machine interrupt-enable register.
+    MIE = 0x304
+    # Machine trap-handler base address.
+    MTVEC = 0x305
+    # Machine counter enable.
+    MCOUNTEREN = 0x306
+    # Scratch register for machine trap handlers.
+    MSCRATCH = 0x340
+    # Machine exception program counter.
+    MEPC = 0x341
+    # Machine trap cause.
+    MCAUSE = 0x342
+    # Machine bad address or instruction.
+    MTVAL = 0x343
+    # Machine interrupt pending.
+    MIP = 0x344
+
+    # Supervisor-level CSRs.
+    # Supervisor status register.
+    SSTATUS = 0x100
+    # Supervisor interrupt-enable register.
+    SIE = 0x104
+    # Supervisor trap handler base address.
+    STVEC = 0x105
+    # Scratch register for supervisor trap handlers.
+    SSCRATCH = 0x140
+    # Supervisor exception program counter.
+    SEPC = 0x141
+    # Supervisor trap cause.
+    SCAUSE = 0x142
+    # Supervisor bad address or instruction.
+    STVAL = 0x143
+    # Supervisor interrupt pending.
+    SIP = 0x144
+    # Supervisor address translation and protection.
+    SATP = 0x180
 
 class XRegisters():
     def __init__(self):
@@ -59,7 +66,6 @@ class XRegisters():
             "a6", "a7", "s2", "s3", "s4", "s5", "s6", "s7",
             "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6"
         ]
-        
         # sp
         self.xregs[2] = np.uint64(bus.DRAM_BASE + bus.DRAM_SIZE)
 
@@ -78,45 +84,52 @@ class XRegisters():
 
     def write(self, index: int, value: np.uint64):
         if not isinstance(value, np.uint64):
-            raise("register value type must be uint64")
+            print("register value type must be uint64")
+            value = np.uint64(value)
         if index > 0 and index < 32:
             self.xregs[index] = value
 
     def dump(self):
         for i in range(len(self.xregs)):
             print(self._xnames[i] + "[x{}]\t{}\t({});".format(i, self.xregs[i], hex(self.xregs[i])))
-            
+
 class CSRegisters():
     def __init__(self):
         self.csrs = [np.uint64(0)] * 4096
 
     def read(self, index: int) -> np.uint64:
+        if isinstance(index, CSR):
+            index = int(index.value)
         match index:
-            case consts.SIE:
-                return self.csrs[consts.MIE] & self.csrs[consts.MIDELEG]
+            case CSR.SIE:
+                return self.csrs[CSR.MIE] & self.csrs[CSR.MIDELEG]
             case other:
                 return self.csrs[index]
 
     def write(self, index: int, value: np.uint64):
+        if not isinstance(value, np.uint64):
+            print("register value type must be uint64")
+            value = np.uint64(value)
+        index = int(index)
         match index:
-            case consts.SIE:
-                self.csrs[consts.MIE] = (self.csrs[consts.MIE] & ~self.csrs[consts.MIDELEG]) |\
-                                 (value & self.csrs[consts.MIDELEG])
+            case CSR.SIE:
+                self.csrs[CSR.MIE] = (self.csrs[CSR.MIE] & ~self.csrs[CSR.MIDELEG]) |\
+                                 (value & self.csrs[CSR.MIDELEG])
             case other:
                 self.csrs[index] = value
 
     def dump(self):
         mregs = "mstatus\t{}\t{}\nmtvec\t{}\t{}\nmepc\t{}\t{}\nmcause\t{}\t{}".format(
-            self.read(consts.MSTATUS), hex(self.read(consts.MSTATUS)),
-            self.read(consts.MTVEC), hex(self.read(consts.MTVEC)),
-            self.read(consts.MEPC), hex(self.read(consts.MEPC)),
-            self.read(consts.MCAUSE), hex(self.read(consts.MCAUSE)))
+            self.read(CSR.MSTATUS), hex(self.read(CSR.MSTATUS)),
+            self.read(CSR.MTVEC), hex(self.read(CSR.MTVEC)),
+            self.read(CSR.MEPC), hex(self.read(CSR.MEPC)),
+            self.read(CSR.MCAUSE), hex(self.read(CSR.MCAUSE)))
         print(mregs)
         sregs = "sstatus\t{}\t{}\nstvec\t{}\t{}\nsepc\t{}\t{}\nscause\t{}\t{}".format(
-            self.read(consts.SSTATUS), hex(self.read(consts.SSTATUS)),
-            self.read(consts.STVEC), hex(self.read(consts.STVEC)),
-            self.read(consts.SEPC), hex(self.read(consts.SEPC)),
-            self.read(consts.SCAUSE), hex(self.read(consts.SCAUSE)))
+            self.read(CSR.SSTATUS), hex(self.read(CSR.SSTATUS)),
+            self.read(CSR.STVEC), hex(self.read(CSR.STVEC)),
+            self.read(CSR.SEPC), hex(self.read(CSR.SEPC)),
+            self.read(CSR.SCAUSE), hex(self.read(CSR.SCAUSE)))
         print(sregs)
 
 
@@ -127,7 +140,8 @@ class Cpu():
         self.pc = np.uint64(bus.DRAM_BASE)
         self.bus = bus.Bus()
         self.csrs = CSRegisters()
-        
+        self.mode = MODE.MACHINE
+
     def fetch(self):
         addr = self.pc
         arr = self.bus.load(int(addr), 4)
@@ -151,12 +165,13 @@ class Cpu():
 
     def loaduint(self, addr, size):
         arr = self.bus.load(nt(addr), size)
-        val = 0
-        for i in range(size):
-            val = val | (arr[i] << (8 * i))
+        # val = 0
+        # for i in range(size):
+        #     val = val | (arr[i] << (8 * i))
+        val = int.from_bytes(arr, byteorder='little', signed=False)
         return np.uint64(val)
 
-    def execute(self, inst):
+    def execute(self, inst) -> bool | trap.EXCEPTION:
         opcode = inst & 0x7f
         rd = (inst >> 7) & 0x1f
         rs1 = (inst >> 15) & 0x1f
@@ -208,7 +223,7 @@ class Cpu():
                 match funct3:
                     case 0x0:
                         # addi
-                        value = np.uint64(np.uint64(self.xreg.read(rs1)) + imm)
+                        value = np.uint64(self.xreg.read(rs1) + imm)
                         print('addi immis value ',hex(imm), hex(value))
                     case 0x1:
                         # slli
@@ -287,44 +302,75 @@ class Cpu():
                         self.bus.store(addr, 8, vbytes[0:8])
                     case other:
                         return False
+            case 0x2f:  # rv64a
+                funct5 = (funct7 & 0b1111100) >> 2
+                _aq = (funct7 & 0b0000010) >> 1
+                _rl = funct7 & 0b0000001
+                match (funct3, funct5):
+                    case (0x2, 0x00):  # amoadd.w
+                        t = self.bus.load(self.xreg.read(rs1), 4)
+                        value = t + self.xreg.read(rs2)
+                        vbytes = value.to_bytes(8, byteorder='little', signed='True')
+                        self.bus.store(self.xreg.read(rs1), 4, vbytes[0:4])
+                        self.regs.write(rd, t)
+                    case (0x3, 0x00):  # amoadd.d
+                        t = self.bus.load(self.xreg.read(rs1), 8)
+                        value = t + self.xreg.read(rs2)
+                        vbytes = value.to_bytes(8, byteorder='little', signed='True')
+                        self.bus.store(self.xreg.read(rs1), 8, vbytes[0:8])
+                        self.regs.write(rd, t)
+                    case (0x2, 0x01):  # amoswap.w
+                        t = self.bus.load(self.xreg.read(rs1), 4)
+                        value = self.xreg.read(rs2)
+                        vbytes = value.to_bytes(8, byteorder='little', signed='True')
+                        self.bus.store(self.xreg.read(rs1), 4, vbytes[0:4])
+                        self.regs.write(rd, t)
+                    case (0x3, 0x1):  # amoswap.d
+                        t = self.bus.load(self.xreg.read(rs1), 8)
+                        value = self.xreg.read(rs2)
+                        vbytes = value.to_bytes(8, byteorder='little', signed='True')
+                        self.bus.store(self.xreg.read(rs1), 4, vbytes[0:8])
+                        self.regs.write(rd, t)
+                    case other:
+                        return False
+
             case 0x33:  # add
                 shamt = (self.xreg.read(rs2) & np.uint64(0x3f)).astype('uint32')
                 value = 0
                 match (funct3, funct7):
-                    case (0x0, 0x00):
+                    case (0x0, 0x00):  # add
                         value = self.xreg.read(rs1) + self.xreg.read(rs2)
-                    case (0x0, 0x01):
+                    case (0x0, 0x01):  # mul
                         value = self.xreg.read(rs1) * self.xreg.read(rs2)
-                    case (0x0, 0x20):
+                    case (0x0, 0x20):  # sub
                         value = self.xreg.read(rs1) - self.xreg.read(rs2)
-                    case (0x1, 0x00):
+                    case (0x1, 0x00):  # sll
                         value = self.xreg.read(rs1) << shamt
-                    case (0x2, 0x00):
+                    case (0x2, 0x00):  # slt
                         cond = np.int64(self.xreg.read(rs1)) < np.int64(self.xreg.read(rs2))
                         value = 1 if cond else 0
-                    case (0x3, 0x00):
+                    case (0x3, 0x00):  # sltu
                         cond = self.xreg.read(rs1) < self.xreg.read(rs2)
                         value = 1 if cond else 0
-                    case (0x4, 0x00):
+                    case (0x4, 0x00):  # xor
                         value = self.xreg.read(rs1) ^ self.xreg.read(rs2)
-                    case (0x5, 0x00):
+                    case (0x5, 0x00):  # srl
                         value = self.xreg.read(rs1) << shamt
-                    case (0x5, 0x20):
+                    case (0x5, 0x20):  # sra
                         value = np.int64(self.xreg.read(rs1)) << shamt
-                    case (0x6, 0x00):
+                    case (0x6, 0x00):  # or
                         value = self.xreg.read(rs1) | self.xreg.read(rs2)
-                    case (0x7, 0x00):
+                    case (0x7, 0x00):  # and
                         value = self.xreg.read(rs1) & self.xreg.read(rs2)
                     case other:
                         return False
                 self.xreg.write(rd, np.uint64(value))
-            case 0x37:
+            case 0x37:  # lui
                 value = np.uint64(np.int32(inst & 0xfffff000))
                 self.xreg.write(rd, value)
             case 0x3b:
                 shamt = np.uint32(self.xreg.read(rs2) & np.uint64(0x1f))
                 value = 0
-                print("word inst ...................")
                 match (funct3, funct7):
                     case (0x0, 0x00):
                         # addw
@@ -339,9 +385,33 @@ class Cpu():
                     case (0x5, 0x00):
                         # srlw
                         value = np.uint32(self.xreg.read(rs1)) >> shamt
+                    case (0x5, 0x01):
+                        # divu
+                        value = 0
+                        match self.xreg.read(rs2):
+                            case 0:
+                                # exception
+                                value = 0xffffffff_ffffffff
+                                pass
+                            case other:
+                                dividend = self.xreg.read(rs1)
+                                divisor = self.xreg.read(rs2)
+                                value = dividend / divisor
+                        self.xreg.write(rd, value)
                     case (0x5, 0x20):
                         # sraw
                         value = np.int32(self.xreg.read(rs1)) >> shamt
+                    case (0x7, 0x01):
+                        # remuw
+                        value = 0
+                        match self.xreg.read(rs2):
+                            case 0:
+                                value = self.xreg.read(rs1)
+                            case other:
+                                dividend = np.uint32(self.xreg.read(rs1))
+                                divisor = np.uint32(self.xreg.read(rs2))
+                                value = dividend % divisor
+                        self.xreg.write(rd, value)
                     case other:
                         return False
                 self.xreg.write(rd, np.uint64(value))
@@ -371,7 +441,7 @@ class Cpu():
                         # bgeu
                         cond = self.xreg.read(rs1) >= self.xreg.read(rs2)
                     case other:
-                        return False 
+                        return False
                 if cond:
                     self.pc = np.uint64(self.pc + imm - 4)
             case 0x67:
@@ -390,6 +460,38 @@ class Cpu():
             case 0x73:
                 csr_addr = int((inst & 0xfff00000) >> 20)
                 match funct3:
+                    case 0x0:
+                        match (rs2, funct7):
+                            case (0x2, 0x8):  # sret
+                                self.pc = self.csrs.read(CSR.SEPC)
+                                flag = (self.csrs.read(CSR.SSTATUS) >> 8) & 1
+                                self.mode = MODE.SUPERVISOR if flag else MODE.USER
+                                flag = (self.csrs.read(CSR.SSTATUS) >> 5) & 1
+                                value = self.csrs.read(CSR.SSTSTUS) | (1 << 1) if flag else\
+                                        self.csrs.read(CSR.SSTATUS) & ~(1 << 1)
+                                self.csrs.write(CSR.SSTATUS, value)
+                                self.csrs.write(CSR.SSTATUS, self.csrs.read(CSR.SSTATUS) | (1 << 5))
+                                self.csrs.write(CSR.SSTATUS, self.csrs.read(CSR.SSTATUS) & ~(1 << 8))
+                            case (0x2, 0x18):  # mret
+                                self.pc = self.csrs.read(CSR.MEPC)
+                                flag = (self.load_csr(CSR.MSTATUS) >> 11) & 0b11
+                                match flag:
+                                    case 0x2:
+                                        self.mode = MODE.MACHINE
+                                    case 0x1:
+                                        self.mode = MODE.SUPERVISOR
+                                    case other:
+                                        self.mode = MODE.USER
+                                flag = (self.csrs.read(CSR.MSTATUS) >> 7) & 1
+                                value = self.csrs.read(CSR.MSTATUS) | (1 << 3) if flag else\
+                                        self.csrd.read(CSR.MSTATUS) & ~(1 << 3)
+                                self.csrs.write(CSR.MSTATUS, value)
+                                self.csrs.write(CSR.MSTATUS, self.csrs.read(CSR.MSTATUS) | (1 << 7))
+                                self.csrs.write(CSR.MSTATUS, self.csrs.read(CSR.MSTATUS) & ~(0b11 << 11))
+                            case (_, 0x9):  # sfence.vma
+                                pass
+                            case other:
+                                return False
                     case 0x1:  # csrrw
                         temp = self.csrs.read(csr_addr)
                         self.csrs.write(csr_addr, self.xreg.read(rs1))
@@ -422,12 +524,60 @@ class Cpu():
                 print("UnSupported inst", hex(inst))
                 return False
         return True
-               
 
     def dump_regs(self):
-        print("pc", hex(self.pc)) 
+        print("pc", hex(self.pc))
         self.xreg.dump()
         self.csrs.dump()
+
+    def handle_trap(self, e):
+        exception_pc = self.pc - np.uint64(4)
+        previous_mode = self.mode
+        cause = e.value
+        medeleg = self.csrs.read(CSR.MEDELEG)
+        if (previous_mode <= MODE.SUPERVISOR) and (medeleg >> cause) & 1 != 0:
+            # handle trap in s-mode
+            self.mode = MODE.SUPERVISOR
+            self.pc = self.csrs.read(CSR.STVEC) & (~1)
+            self.csrs.write(CSR.SEPC, exception_pc & (~1))
+            self.csrs.write(CSR.SCAUSE, cause)
+            self.csrs.write(CSR.STVAL, 0)
+
+            # Set a previous interrupt-enable bit for supervisor mode (SPIE, 5) to the value
+            # of a global interrupt-enable bit for supervisor mode (SIE, 1).
+            value = 0
+            if (self.csrs.read(CSR.SSTATUS) >> 1) & 1 == 1:
+                value = self.csrs.read(CSR.SSTATUS) | (1 << 5)
+            else:
+                value = self.csrs.read(CSR.SSTATUS) & ~(1 << 5)
+            self.csrs.write(CSR.SSTATUS, value)
+            # Set a global interrupt-enable bit for supervisor mode (SIE, 1) to 0.
+            value = self.csrs.read(CSR.SSTATUS) & ~(1 << 1)
+            self.csrs.write(CSR.SSTATUS, value)
+            # 4.1.1 Supervisor Status Register (sstatus)
+            # "When a trap is taken, SPP is set to 0 if the trap originated from user mode, or
+            # 1 otherwise."
+            value = self.csrs.read(CSR.SSTATUS) & ~(1 << 8)
+            if previous_mode == MODE.SUPERVISOR:
+                value = self.csrs.read(CSR.SSTATUS) | (1 << 8)
+        else:
+            # handle trap in machine mode
+            self.mode = MODE.MACHINE
+            self.pc = self.csrs.read(CSR.MTVEC) & ~1
+            self.csrs.write(CSR.MEPC, exception_pc & ~1)
+            self.csrs.write(CSR.MCAUSE, cause)
+            self.csrs.write(CSR.MTVAL, 0)
+
+            #  Set a previous interrupt-enable bit for supervisor mode (MPIE, 7) to the value
+            #  of a global interrupt-enable bit for supervisor mode (MIE, 3).
+            value = self.csrs.read(CSR.MSTATUS) | (1 << 7)
+            if (self.csrs.read(CSR.MSTATUS) >> 3 & 1) == 0:
+                value = self.csrs.read(CSR.MSTATUS) & ~(1 << 7)
+            self.csrs.write(CSR.MSTATUS, value)
+            # Set a global interrupt-enable bit for supervisor mode (MIE, 3) to 0.
+            self.csrs.write(CSR.MSTATUS, self.csrs.read(CSR.MSTATUS) & ~(1 << 3))
+            # Set a previous privilege mode for supervisor mode (MPP, 11..13) to 0.
+            self.csrs.write(CSR.MSTATUS, self.csrs.read(CSR.MSTATUS) & ~(0b11 << 11))
 
     def run(self):
         while True:
