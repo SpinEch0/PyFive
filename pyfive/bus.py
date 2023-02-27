@@ -1,5 +1,6 @@
 from pyfive import clint
 from pyfive import plic
+from pyfive import dram
 
 DRAM_BASE=0x8000_0000
 DRAM_SIZE=128*1024*1024
@@ -10,24 +11,11 @@ CLINT_SIZE=0x10000
 PLIC_BASE=0xc00_0000
 PLIC_SIZE=0x4000000
 
-class Memory():
-    def __init__(self, size):
-        self.ram = bytearray(size)
-        self.size = size
-
-    def load(self, addr, size):
-        return self.ram[addr:addr+size] 
-
-    def store(self, addr, size, data):
-        self.ram[addr:addr+size] = data
-        return True 
-
-
 class Bus():
     def __init__(self, size=DRAM_SIZE):
-        self.ram = Memory(size)
+        self.ram = dram.Memory(size)
         self.clint = clint.Clint(CLINT_SIZE)
-        self.plic = Memory(PLIC_SIZE)
+        self.plic = plic.Plic(PLIC_SIZE)
 
 
     def load_data(self, file):
