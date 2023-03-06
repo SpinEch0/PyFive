@@ -1,8 +1,7 @@
 from pyfive import bus
 from pyfive import trap
-
+import sys
 import numpy as np
-
 from enum import Enum
 
 class MODE(Enum):
@@ -57,6 +56,15 @@ class CSR(Enum):
     # Supervisor address translation and protection.
     SATP = 0x180
 
+
+class MIP(Enum):
+    SSIP = 1 << 1
+    MSIP = 1 << 3
+    STIP = 1 << 5
+    MTIP = 1 << 7
+    SEIP = 1 << 9
+    MEIP = 1 << 11
+
 class XRegisters():
     def __init__(self):
         self.xregs = [np.uint64(0)] * 32
@@ -84,7 +92,7 @@ class XRegisters():
 
     def write(self, index: int, value: np.uint64):
         if not isinstance(value, np.uint64):
-            print("register value type must be uint64")
+            # print("register value type must be uint64")
             value = np.uint64(value)
         if index > 0 and index < 32:
             self.xregs[index] = value
@@ -107,14 +115,15 @@ class CSRegisters():
                 return self.csrs[index]
 
     def write(self, index: int, value: np.uint64):
+        if isinstance(index, CSR):
+            index = int(index.value)
         if not isinstance(value, np.uint64):
-            print("register value type must be uint64")
+            # print("register value type must be uint64")
             value = np.uint64(value)
-        index = int(index)
         match index:
-            case CSR.SIE:
-                self.csrs[CSR.MIE] = (self.csrs[CSR.MIE] & ~self.csrs[CSR.MIDELEG]) |\
-                                 (value & self.csrs[CSR.MIDELEG])
+            case CSR.SIE.value:
+                self.csrs[CSR.MIE.value] = (self.csrs[CSR.MIE.value] & ~self.csrs[CSR.MIDELEG.value]) |\
+                                 (value & self.csrs[CSR.MIDELEG.value])
             case other:
                 self.csrs[index] = value
 
@@ -145,8 +154,8 @@ class Cpu():
     def fetch(self):
         addr = self.pc
         arr = self.bus.load(int(addr), 4)
-        if len(arr) != 4:
-            raise("inst fetch overflow!")
+        if not arr or len(arr) != 4:
+            return trap.EXCEPTION.InstructionAccessFault
         return arr[0] | arr[1] << 8 | arr[2] << 16 | arr[3] << 24
 
     def loadint(self, addr, size):
@@ -164,7 +173,7 @@ class Cpu():
     #     return int(val_bit)
 
     def loaduint(self, addr, size):
-        arr = self.bus.load(nt(addr), size)
+        arr = self.bus.load(int(addr), size)
         # val = 0
         # for i in range(size):
         #     val = val | (arr[i] << (8 * i))
@@ -199,7 +208,7 @@ class Cpu():
                     case 0x2:
                         # lw, load word
                         val = self.loadint(addr, 4)
-                        print("load word ", val)
+                        # print("load word ", val)
                     case 0x3:
                         # ld, load double word
                         val = self.loadint(addr, 8)
@@ -213,8 +222,8 @@ class Cpu():
                         # lwu
                         val = self.loaduint(addr, 4)
                     case other:
-                        print("UnSupported load inst: {}, funct3({}) is unknown!".format(hex(inst), hex(funct3)))
-                        return False
+                        # print("UnSupported load inst: {}, funct3({}) is unknown!".format(hex(inst), hex(funct3)))
+                        return trap.EXCEPTION.IllegalInstruction
                 self.xreg.write(rd, val)
             case 0x13:
                 imm = np.uint64(np.int32(inst&0xfff00000)>>20)
@@ -224,7 +233,7 @@ class Cpu():
                     case 0x0:
                         # addi
                         value = np.uint64(self.xreg.read(rs1) + imm)
-                        print('addi immis value ',hex(imm), hex(value))
+                        # print('addi immis value ',hex(imm), hex(value))
                     case 0x1:
                         # slli
                         value = self.xreg.read(rs1) << shamt
@@ -244,18 +253,18 @@ class Cpu():
                             case 0x10:
                                 value = self.xreg.read(rs1).astype('int64') >> shamt
                             case other:
-                                print("Unsupport inst", hex(inst))
-                                return False
+                                # print("Unsupport inst", hex(inst))
+                                return trap.EXCEPTION.IllegalInstruction
                     case 0x6:
                         value = self.xreg.read(rs1) | imm
                     case 0x7:
                         value = self.xreg.read(rs1) & imm
                     case other:
                         print("Unsupport inst", hex(inst))
-                        return False
+                        return trap.EXCEPTION.IllegalInstruction
                 self.xreg.write(rd, np.uint64(value))
             case 0x17:  # auipc
-                print("auipc*************************")
+                # print("auipc*************************")
                 imm = np.uint64(np.int32(inst & 0xfffff000))
                 self.xreg.write(rd, self.pc + imm - np.uint64(4))
             case 0x1b:
@@ -277,17 +286,17 @@ class Cpu():
                                 value = (self.xreg.read(rs1).astype('int32')) >> shamt
                             case other:
                                 print("Unsupport inst", hex(inst))
-                                return False
+                                return trap.EXCEPTION.IllegalInstruction
                     case other:
                         print("Unsupport inst", hex(inst))
-                        return False
+                        return trap.EXCEPTION.IllegalInstruction
                 self.xreg.write(rd, np.uint64(value))
             case 0x23:  # store
                 imm = np.uint64((np.int32(inst & 0xfe000000) >> 20)) |\
                       np.uint64(((inst >> 7) & 0x1f))
-                print("imm", np.int64(imm))
+                # print("imm", np.int64(imm))
                 addr = int(np.uint64(self.xreg.read(rs1)) + imm)
-                print("addr", hex(addr))
+                # print("addr", hex(addr))
                 value = int(self.xreg.read(rs2))
                 # print(hex(value))
                 vbytes = value.to_bytes(8, byteorder='little', signed='True')
@@ -301,7 +310,7 @@ class Cpu():
                     case 0x3:
                         self.bus.store(addr, 8, vbytes[0:8])
                     case other:
-                        return False
+                        return trap.EXCEPTION.IllegalInstruction
             case 0x2f:  # rv64a
                 funct5 = (funct7 & 0b1111100) >> 2
                 _aq = (funct7 & 0b0000010) >> 1
@@ -332,7 +341,7 @@ class Cpu():
                         self.bus.store(self.xreg.read(rs1), 4, vbytes[0:8])
                         self.regs.write(rd, t)
                     case other:
-                        return False
+                        return trap.EXCEPTION.IllegalInstruction
 
             case 0x33:  # add
                 shamt = (self.xreg.read(rs2) & np.uint64(0x3f)).astype('uint32')
@@ -363,7 +372,7 @@ class Cpu():
                     case (0x7, 0x00):  # and
                         value = self.xreg.read(rs1) & self.xreg.read(rs2)
                     case other:
-                        return False
+                        return trap.EXCEPTION.IllegalInstruction
                 self.xreg.write(rd, np.uint64(value))
             case 0x37:  # lui
                 value = np.uint64(np.int32(inst & 0xfffff000))
@@ -375,7 +384,7 @@ class Cpu():
                     case (0x0, 0x00):
                         # addw
                         value = np.int32(self.xreg.read(rs1) +  self.xreg.read(rs2))
-                        print('addw ', value)
+                        # print('addw ', value)
                     case (0x0, 0x20):
                         # subw
                         value = np.int32(self.xreg.read(rs1) -  self.xreg.read(rs2))
@@ -413,7 +422,7 @@ class Cpu():
                                 value = dividend % divisor
                         self.xreg.write(rd, value)
                     case other:
-                        return False
+                        return trap.EXCEPTION.IllegalInstruction
                 self.xreg.write(rd, np.uint64(value))
             case 0x63:
                 imm = (np.int32(inst & 0x80000000) >> 19).astype('uint64') |\
@@ -441,16 +450,16 @@ class Cpu():
                         # bgeu
                         cond = self.xreg.read(rs1) >= self.xreg.read(rs2)
                     case other:
-                        return False
+                        return trap.EXCEPTION.IllegalInstruction
                 if cond:
                     self.pc = np.uint64(self.pc + imm - 4)
             case 0x67:
-                print("jalr inst******************************")
+                # print("jalr inst******************************")
                 self.xreg.write(rd, self.pc)
                 imm = np.uint64(np.int32(inst & 0xfff00000) >> 20)
                 self.pc = (np.uint64(self.xreg.read(rs1)) + imm) & np.uint64(~1)
             case 0x6f:
-                print("jal inst******************************")
+                # print("jal inst******************************")
                 self.xreg.write(rd, self.pc)
                 imm = np.uint64(np.int32(inst&0x80000000)>>11) |\
                       np.uint64((inst & 0xff000)) |\
@@ -462,6 +471,16 @@ class Cpu():
                 match funct3:
                     case 0x0:
                         match (rs2, funct7):
+                            case (0x0, 0x0):  # ecall
+                                match self.mode:
+                                    case MODE.MACHINE:
+                                        return trap.EXCEPTION.EnvironmentCallFromMMode
+                                    case MODE.SUPERVISOR:
+                                        return trap.EXCEPTION.EnvironmentCallFromSMode
+                                    case MODE.USER:
+                                        return trap.EXCEPTION.EnvironmentCallFromUMode
+                            case (0x1, 0x0):  # ebreak
+                                return trap.EXCEPTION.Breakpoint
                             case (0x2, 0x8):  # sret
                                 self.pc = self.csrs.read(CSR.SEPC)
                                 flag = (self.csrs.read(CSR.SSTATUS) >> 8) & 1
@@ -491,7 +510,7 @@ class Cpu():
                             case (_, 0x9):  # sfence.vma
                                 pass
                             case other:
-                                return False
+                                return trap.EXCEPTION.IllegalInstruction
                     case 0x1:  # csrrw
                         temp = self.csrs.read(csr_addr)
                         self.csrs.write(csr_addr, self.xreg.read(rs1))
@@ -519,26 +538,36 @@ class Cpu():
                         self.csrs.write(csr_addr, (~imm) &  temp)
                         self.xreg.write(rd, temp)
                     case other:
-                        return False
+                        return trap.EXCEPTION.IllegalInstruction
             case other:
-                print("UnSupported inst", hex(inst))
-                return False
+                # print("UnSupported inst", hex(inst))
+                return trap.EXCEPTION.IllegalInstruction
         return True
 
     def dump_regs(self):
-        print("pc", hex(self.pc))
+        print("=====================pc===================", hex(self.pc))
         self.xreg.dump()
         self.csrs.dump()
 
-    def handle_trap(self, e):
-        exception_pc = self.pc - np.uint64(4)
+    def handle_trap(self, e, offset, intr = False):
+        exception_pc = self.pc + np.uint64(offset)
         previous_mode = self.mode
         cause = e.value
         medeleg = self.csrs.read(CSR.MEDELEG)
-        if (previous_mode <= MODE.SUPERVISOR) and (medeleg >> cause) & 1 != 0:
+        if intr:
+            cause = (1 << 63) | cause
+        if (previous_mode.value <= MODE.SUPERVISOR.value) and (medeleg >> cause) & np.uint64(1) != 0:
             # handle trap in s-mode
             self.mode = MODE.SUPERVISOR
-            self.pc = self.csrs.read(CSR.STVEC) & (~1)
+
+            # Set the program counter to the supervisor trap-handler base address (stvec).
+            if intr:
+                stvec = self.csrs.read(CSR.STVEC) & 1
+                vector = 4 * cause if stvec else 0
+                self.pc = (self.csrs.read(CSR.STVEC) & ~1) + vector
+            else:
+                self.pc = self.csrs.read(CSR.STVEC) & (~1)
+
             self.csrs.write(CSR.SEPC, exception_pc & (~1))
             self.csrs.write(CSR.SCAUSE, cause)
             self.csrs.write(CSR.STVAL, 0)
@@ -546,52 +575,116 @@ class Cpu():
             # Set a previous interrupt-enable bit for supervisor mode (SPIE, 5) to the value
             # of a global interrupt-enable bit for supervisor mode (SIE, 1).
             value = 0
-            if (self.csrs.read(CSR.SSTATUS) >> 1) & 1 == 1:
-                value = self.csrs.read(CSR.SSTATUS) | (1 << 5)
+            if (self.csrs.read(CSR.SSTATUS) >> 1) & inp.uint64(1) == 1:
+                value = self.csrs.read(CSR.SSTATUS) | np.uint64((1 << 5))
             else:
-                value = self.csrs.read(CSR.SSTATUS) & ~(1 << 5)
+                value = self.csrs.read(CSR.SSTATUS) & ~np.uint64(1 << 5)
             self.csrs.write(CSR.SSTATUS, value)
             # Set a global interrupt-enable bit for supervisor mode (SIE, 1) to 0.
-            value = self.csrs.read(CSR.SSTATUS) & ~(1 << 1)
+            value = self.csrs.read(CSR.SSTATUS) & ~np.uint64((1 << 1))
             self.csrs.write(CSR.SSTATUS, value)
             # 4.1.1 Supervisor Status Register (sstatus)
             # "When a trap is taken, SPP is set to 0 if the trap originated from user mode, or
             # 1 otherwise."
-            value = self.csrs.read(CSR.SSTATUS) & ~(1 << 8)
+            value = self.csrs.read(CSR.SSTATUS) & ~np.uint64((1 << 8))
             if previous_mode == MODE.SUPERVISOR:
-                value = self.csrs.read(CSR.SSTATUS) | (1 << 8)
+                value = self.csrs.read(CSR.SSTATUS) | np.uint64(1 << 8)
+            self.csrs.write(CSR.SSTATUS, value)
         else:
             # handle trap in machine mode
             self.mode = MODE.MACHINE
-            self.pc = self.csrs.read(CSR.MTVEC) & ~1
-            self.csrs.write(CSR.MEPC, exception_pc & ~1)
+
+            # Set the program counter to the machine trap-handler base address (mtvec).
+            if intr:
+                stvec = self.csrs.read(CSR.MTVEC) & 1
+                vector = 4 * cause if stvec else 0
+                self.pc = (self.csrs.read(CSR.MTVEC) & np.uint64(~1)) + vector
+            else:
+                self.pc = (self.csrs.read(CSR.MTVEC) & np.uint64(~1))
+
+            self.pc = self.csrs.read(CSR.MTVEC) & ~np.uint64(1)
+            self.csrs.write(CSR.MEPC, exception_pc & ~np.uint64(1))
             self.csrs.write(CSR.MCAUSE, cause)
             self.csrs.write(CSR.MTVAL, 0)
 
             #  Set a previous interrupt-enable bit for supervisor mode (MPIE, 7) to the value
             #  of a global interrupt-enable bit for supervisor mode (MIE, 3).
-            value = self.csrs.read(CSR.MSTATUS) | (1 << 7)
-            if (self.csrs.read(CSR.MSTATUS) >> 3 & 1) == 0:
-                value = self.csrs.read(CSR.MSTATUS) & ~(1 << 7)
+            value = self.csrs.read(CSR.MSTATUS) | np.uint64(1 << 7)
+            if (int(self.csrs.read(CSR.MSTATUS)) >> 3 & 1) == 0:
+                value = self.csrs.read(CSR.MSTATUS) & ~np.uint64(1 << 7)
             self.csrs.write(CSR.MSTATUS, value)
             # Set a global interrupt-enable bit for supervisor mode (MIE, 3) to 0.
-            self.csrs.write(CSR.MSTATUS, self.csrs.read(CSR.MSTATUS) & ~(1 << 3))
+            self.csrs.write(CSR.MSTATUS, self.csrs.read(CSR.MSTATUS) & ~np.uint64(1 << 3))
             # Set a previous privilege mode for supervisor mode (MPP, 11..13) to 0.
-            self.csrs.write(CSR.MSTATUS, self.csrs.read(CSR.MSTATUS) & ~(0b11 << 11))
+            self.csrs.write(CSR.MSTATUS, self.csrs.read(CSR.MSTATUS) & ~np.uint64(0b11 << 11))
+        abort_e = [
+                      trap.EXCEPTION.InstructionAddressMisaligned,
+                      trap.EXCEPTION.InstructionAccessFault,
+                      trap.EXCEPTION.IllegalInstruction,
+                      trap.EXCEPTION.LoadAccessFault,
+                      trap.EXCEPTION.StoreAMOAddressMisaligned,
+                      trap.EXCEPTION.StoreAMOAccessFault,
+                  ]
+
+        if e in abort_e:
+            print(f"cpu unhandled exception {e}")
+            self.dump_regs()
+            sys.exit(0)
+
+    def handle_intr(self):
+        match self.mode:
+            case MODE.MACHINE:
+                if (int(self.csrs.read(CSR.MSTATUS)) >> 3) & 1 == 0:
+                    return
+            case MODE.SUPERVISOR:
+                if (int(self.csrs.read(CSR.SSTATUS)) >> 1) & 1 == 0:
+                    return
+        irq = 0
+        if self.bus.uart.is_interrupting():
+            irq = uart.UART.IRQ.value
+            self.bus.store(bus.PLIC.SCLAIM, 4, irq)
+            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) | MIP.SEIP)
+
+        pending = self.csrs.read(CSR.MIE) & self.csrs.read(CSR.MIP)
+
+        e  = None
+        if pending & MIP.MEIP != 0:
+            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) & ~MIP.MEIP)
+            e = trap.INTERRUPT.MachineExternelInterrupt
+        elif pending & MIP.MSIP != 0:
+            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) & ~MIP.MSIP)
+            e = trap.INTERRUPT.SoftwareInterrupt
+        elif pending & MIP.MTIP != 0:
+            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) & ~MIP.MTIP)
+            e = trap.INTERRUPT.MachineTimerInterrupt
+        elif pending & MIP.SEIP != 0:
+            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) & ~MIP.SEIP)
+            e = trap.INTERRUPT.SupervisorExternalInterrupt
+        elif pending & MIP.SSIP != 0:
+            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) & ~MIP.SSIP)
+            e = trap.INTERRUPT.SupervisorSoftwareInterrupt
+        elif pending & MIP.STIP != 0:
+            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) & ~MIP.STIP)
+            e = trap.INTERRUPT.SupervisorTimerInterrupt
+
+        if e:
+            return self.handle_trap(e, -4, true)
 
     def run(self):
         while True:
-             if self.pc == 0:
-                 print("stop with addr 0 inst")
-                 self.dump_regs()
-                 break
+             # if self.pc == 0:
+             #     print("stop with addr 0 inst")
+             #     self.dump_regs()
+             #     break
              inst = self.fetch()
-             self.pc += np.uint64(4)
-             print("pc", hex(self.pc))
-             print("inst", hex(inst))
-             ret = self.execute(inst)
-             if not ret:
-                 print("Stop with unknown inst")
-                 self.dump_regs()
-                 break
+             ret = True
+             if isinstance(inst, trap.EXCEPTION):
+                 self.handle_trap(inst, 0)
 
+
+             self.pc += np.uint64(4)
+             ret = self.execute(inst)
+             if isinstance(ret, trap.EXCEPTION):
+                 self.handle_trap(ret, -4)
+
+             self.handle_intr()

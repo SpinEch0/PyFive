@@ -15,3 +15,15 @@ class EXCEPTION(Enum):
     InstructionPageFault = 12
     LoadPageFault = 13
     StoreAMOPageFault = 15
+
+class INTERRUPT(Enum):
+    UserSoftwareInterrupt        = 1
+    SupervisorSoftwareInterrupt  = 2
+    MachineSoftwareInterrupt     = 3
+    UserTimerInterrupt           = 4
+    SupervisorTimerInterrupt     = 5
+    MachineTimerInterrupt        = 6
+    UserExternalInterrupt        = 7
+    SupervisorExternalInterrupt  = 8
+    MachineExternalInterrupt     = 9
+
