@@ -1,10 +1,15 @@
 import sys
 from typing import List
 from pyfive import cpu
+from pyfive import bus
+import logging
 
+LOG_FORMAT = "%(asctime)s - %(levelname)s - %(filename)s[%(lineno)d] - %(message)s"
+logging.basicConfig(format=LOG_FORMAT)
+logging.getLogger().setLevel(logging.DEBUG)
 def main(argv: List[str] = None) -> int:
-    emu = cpu.Cpu()
-    emu.bus.load_data("fib.bin")
+    mybus = bus.Bus(dram_bin="kernel", disk_bin="fs.img")
+    emu = cpu.Cpu(mybus)
     emu.run()
 
 if __name__ == "__main__":

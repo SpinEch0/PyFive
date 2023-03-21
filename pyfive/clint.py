@@ -36,10 +36,12 @@ class Clint():
     def load(self, addr, size):
         if size != 8:
             raise("loading clint size is not 8")
-        return self.load64(addr).to_bytes(8, byteorder='little', singed='False')
+        return self.load64(addr)  # .to_bytes(8, byteorder='little', singed='False')
 
     def store(self, addr, size, data):
         if size != 8:
             raise("storing clint size is not 8")
-        val = int.from_bytes(data, byteorder='little', signed=False)
+        value = data
+        if isinstance(data, bytes):
+            val = int.from_bytes(data, byteorder='little', signed=False)
         self.store64(addr, val)

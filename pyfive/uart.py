@@ -4,6 +4,7 @@ import threading
 import sys
 import time
 import copy
+import os
 
 class UART(Enum):
     RHR = 0
@@ -19,13 +20,14 @@ def keyboard_thread(uart):
         c = sys.stdin.read(1)
         if len(c) == 0:
             print("keyboard exit")
-            sys.exit(0)
+            os.abort()
         while (uart.regs[UART.LSR.value] & np.uint64(UART.LSR_RX.value)) == 1:
              uart.cond.acquire()
              uart.cond.wait()
              uart.cond.release()
         uart.mutex.acquire()
         uart.regs[UART.RHR.value] = np.uint64(ord(c))
+        uart.intr = True
         uart.regs[UART.LSR.value] |= np.uint64(UART.LSR_RX.value)
         uart.mutex.release()
         #print("keyboard get=====", ord(c))
@@ -36,9 +38,16 @@ class Uart():
         self.cond = threading.Condition()
         self.thread = threading.Thread(target=keyboard_thread,
                                        args=(self,))
+        self.intr = False
         self.mutex = threading.Lock()
         self.thread.setDaemon(True)
         self.thread.start()
+
+    def is_interrupting(self):
+        if self.intr:
+            self.intr = False
+            return True
+        return False
 
     def load(self, addr, size):
         if size != 1:

@@ -3,11 +3,22 @@ from pyfive import trap
 import sys
 import numpy as np
 from enum import Enum
+import logging
+
+from pyfive import uart
+from pyfive import virtio
+from pyfive import plic
+
 
 class MODE(Enum):
     USER = 0b00
     SUPERVISOR = 0b01
     MACHINE = 0b11
+
+class ACCESSTYPE(Enum):
+    INSTRUCTION = 0
+    LOAD = 1
+    STORE = 2
 
 class CSR(Enum):
     # Machine-level CSRs.
@@ -144,26 +155,44 @@ class CSRegisters():
 
 class Cpu():
 
-    def __init__(self):
+    def __init__(self, obus):
         self.xreg = XRegisters()
         self.pc = np.uint64(bus.DRAM_BASE)
-        self.bus = bus.Bus()
+        self.bus = obus
         self.csrs = CSRegisters()
         self.mode = MODE.MACHINE
+        self.enable_paging = False
+        self.page_table = 0
 
     def fetch(self):
-        addr = self.pc
+        ppc = self.translate(self.pc, ACCESSTYPE.INSTRUCTION)
+        if isinstance(ppc, trap.EXCEPTION):
+            return ppc
+        addr = ppc
         arr = self.bus.load(int(addr), 4)
-        if not arr or len(arr) != 4:
+        if isinstance(arr, trap.EXCEPTION):
             return trap.EXCEPTION.InstructionAccessFault
         return arr[0] | arr[1] << 8 | arr[2] << 16 | arr[3] << 24
 
+
+
+    def load(self, addr, size):
+        paddr = self.translate(addr, ACCESSTYPE.LOAD)
+        return self.bus.load(paddr, size)
+
+    def store(self, addr, size, data):
+        paddr = self.translate(addr, ACCESSTYPE.STORE)
+        return self.bus.store(paddr, size, data)
+
     def loadint(self, addr, size):
-        arr = self.bus.load(int(addr), size)
-        # print("loadint", hex(addr) ,size, len(arr), arr)
-        if len(arr) < size:
-            raise('Loadint failed!, segmentfault')
-        val = int.from_bytes(arr, byteorder='little', signed=True)
+        arr = self.load(int(addr), size)
+        if isinstance(arr, trap.EXCEPTION):
+            return arr
+        val = arr
+        if isinstance(arr, bytes) or isinstance(arr, bytearray):
+            if len(arr) < size:
+                return trap.EXCEPTION.LoadAccessFault
+            val = int.from_bytes(arr, byteorder='little', signed=False)
         return np.uint64(val)
 
     # def sext(self, val, size, bits):
@@ -173,12 +202,84 @@ class Cpu():
     #     return int(val_bit)
 
     def loaduint(self, addr, size):
-        arr = self.bus.load(int(addr), size)
-        # val = 0
-        # for i in range(size):
-        #     val = val | (arr[i] << (8 * i))
-        val = int.from_bytes(arr, byteorder='little', signed=False)
+        arr = self.load(int(addr), size)
+        if isinstance(arr, trap.EXCEPTION):
+            return arr
+        val = arr
+        logging.debug(f"val is {val}")
+        if isinstance(arr, bytes) or isinstance(arr, bytearray):
+            if len(arr) < size:
+                return trap.EXCEPTION.LoadAccessFault
+            val = int.from_bytes(arr, byteorder='little', signed=True)
         return np.uint64(val)
+
+    def update_paging(self, csr_addr):
+        if csr_addr != CSR.SATP.value:
+            return
+        self.page_table = (self.csrs.read(CSR.SATP) & np.uint64((1 << 44) - 1)) * 4096
+        mode = int(self.csrs.read(CSR.SATP)) >> 60
+        if mode == 8:
+            self.enable_paging = True
+        else:
+            self.enable_paging = False
+
+    def translate(self, addr, access_type):
+        if not self.enable_paging:
+            return addr
+        addr = int(addr)
+        levels = 3
+        vpn = [(addr >> 12) & 0x1ff,
+               (addr >> 21) & 0x1ff,
+               (addr >> 30) & 0x1ff]
+
+        a = self.page_table
+        i = levels - 1
+        while True:
+            pte = self.bus.loaduint(a+vpn[i]*8, 8)
+            if isinstance(pte, trap.EXCEPTION):
+                return pte
+            pte = int(pte)
+            logging.debug(f"read pte is {hex(pte)}")
+            v = pte & 1
+            r = (pte >> 1) & 1
+            w = (pte >> 2) & 1
+            x = (pte >> 3) & 1
+            if v == 0 or (r == 0 and w == 0):
+                match access_type:
+                    case ACCESSTYPE.INSTRUCTION:
+                        return trap.EXCEPTION.InstructionPageFault
+                    case ACCESSTPYE.LOAD:
+                        return trap.EXCEPTION.LoadPageFault
+                    case ACCESSTYPE.STORE:
+                        return trap.EXCEPTION.StoreAMOPAageFault
+            if r == 1 or x == 1:
+                break
+            i = i - 1
+            ppn = (pte >> 10) & 0x0fff_ffff_ffff
+            a = ppn * 4096
+            if i < 0:
+                match access_type:
+                    case ACCESSTYPE.INSTRUCTION:
+                        return trap.EXCEPTION.InstructionPageFault
+                    case ACCESSTPYE.LOAD:
+                        return trap.EXCEPTION.LoadPageFault
+                    case ACCESSTYPE.STORE:
+                        return trap.EXCEPTION.StoreAMOPAageFault
+
+        ppn = [(pte >> 10) & 0x1ff,
+               (pte >> 19) & 0x1ff,
+               (pte >> 28) & 0x03ff_ffff]
+
+        offset = addr & 0xfff
+        logging.debug(f"ppn   i offset {hex(ppn[i])}  {i}  {offset}")
+        match i:
+            case 0:
+                ppn = (pte >> 10) & 0x0fff_ffff_ffff
+                return (ppn << 12) | offset
+            case 1:
+                return ppn[2] << 30 | ppn[1] << 21 | vpn[0] << 12 | offset
+            case 2:
+                return ppn[2] << 30 | vpn[1] << 21 | vpn[0] << 12 | offset
 
     def execute(self, inst) -> bool | trap.EXCEPTION:
         opcode = inst & 0x7f
@@ -224,6 +325,7 @@ class Cpu():
                     case other:
                         # print("UnSupported load inst: {}, funct3({}) is unknown!".format(hex(inst), hex(funct3)))
                         return trap.EXCEPTION.IllegalInstruction
+                logging.info(f"wirte {val}")
                 self.xreg.write(rd, val)
             case 0x13:
                 imm = np.uint64(np.int32(inst&0xfff00000)>>20)
@@ -262,6 +364,7 @@ class Cpu():
                     case other:
                         print("Unsupport inst", hex(inst))
                         return trap.EXCEPTION.IllegalInstruction
+                logging.info(f"wirte {value}")
                 self.xreg.write(rd, np.uint64(value))
             case 0x17:  # auipc
                 # print("auipc*************************")
@@ -290,6 +393,7 @@ class Cpu():
                     case other:
                         print("Unsupport inst", hex(inst))
                         return trap.EXCEPTION.IllegalInstruction
+                logging.info(f"wirte {value}")
                 self.xreg.write(rd, np.uint64(value))
             case 0x23:  # store
                 imm = np.uint64((np.int32(inst & 0xfe000000) >> 20)) |\
@@ -297,18 +401,20 @@ class Cpu():
                 # print("imm", np.int64(imm))
                 addr = int(np.uint64(self.xreg.read(rs1)) + imm)
                 # print("addr", hex(addr))
-                value = int(self.xreg.read(rs2))
-                # print(hex(value))
-                vbytes = value.to_bytes(8, byteorder='little', signed='True')
+                # print(rs2, self.xreg.read(rs2))
+                # print(type(self.xreg.read(rs2)))
+                value = np.uint64(self.xreg.read(rs2))
+                # 8 is not ok
+                vbytes = value.tobytes()
                 match funct3:
                     case 0x0:
-                        self.bus.store(addr, 1, vbytes[0:1])
+                        self.store(addr, 1, vbytes[0:1])
                     case 0x1:
-                        self.bus.store(addr, 2, vbytes[0:2])
+                        self.store(addr, 2, vbytes[0:2])
                     case 0x2:
-                        self.bus.store(addr, 4, vbytes[0:4])
+                        self.store(addr, 4, vbytes[0:4])
                     case 0x3:
-                        self.bus.store(addr, 8, vbytes[0:8])
+                        self.store(addr, 8, vbytes[0:8])
                     case other:
                         return trap.EXCEPTION.IllegalInstruction
             case 0x2f:  # rv64a
@@ -317,29 +423,29 @@ class Cpu():
                 _rl = funct7 & 0b0000001
                 match (funct3, funct5):
                     case (0x2, 0x00):  # amoadd.w
-                        t = self.bus.load(self.xreg.read(rs1), 4)
+                        t = self.loadint(self.xreg.read(rs1), 4)
                         value = t + self.xreg.read(rs2)
-                        vbytes = value.to_bytes(8, byteorder='little', signed='True')
-                        self.bus.store(self.xreg.read(rs1), 4, vbytes[0:4])
-                        self.regs.write(rd, t)
+                        vbytes = value.tobytes()
+                        self.store(self.xreg.read(rs1), 4, vbytes[0:4])
+                        self.xreg.write(rd, t)
                     case (0x3, 0x00):  # amoadd.d
-                        t = self.bus.load(self.xreg.read(rs1), 8)
+                        t = self.loadint(self.xreg.read(rs1), 8)
                         value = t + self.xreg.read(rs2)
-                        vbytes = value.to_bytes(8, byteorder='little', signed='True')
-                        self.bus.store(self.xreg.read(rs1), 8, vbytes[0:8])
-                        self.regs.write(rd, t)
+                        vbytes = value.tobytes()
+                        self.store(self.xreg.read(rs1), 8, vbytes[0:8])
+                        self.xreg.write(rd, t)
                     case (0x2, 0x01):  # amoswap.w
-                        t = self.bus.load(self.xreg.read(rs1), 4)
+                        t = self.loadint(self.xreg.read(rs1), 4)
                         value = self.xreg.read(rs2)
-                        vbytes = value.to_bytes(8, byteorder='little', signed='True')
-                        self.bus.store(self.xreg.read(rs1), 4, vbytes[0:4])
-                        self.regs.write(rd, t)
+                        vbytes = value.tobytes()
+                        self.store(self.xreg.read(rs1), 4, vbytes[0:4])
+                        self.xreg.write(rd, t)
                     case (0x3, 0x1):  # amoswap.d
-                        t = self.bus.load(self.xreg.read(rs1), 8)
+                        t = self.loadint(self.xreg.read(rs1), 8)
                         value = self.xreg.read(rs2)
-                        vbytes = value.to_bytes(8, byteorder='little', signed='True')
-                        self.bus.store(self.xreg.read(rs1), 4, vbytes[0:8])
-                        self.regs.write(rd, t)
+                        vbytes = value.tobytes()
+                        self.store(self.xreg.read(rs1), 4, vbytes[0:8])
+                        self.xreg.write(rd, t)
                     case other:
                         return trap.EXCEPTION.IllegalInstruction
 
@@ -373,6 +479,7 @@ class Cpu():
                         value = self.xreg.read(rs1) & self.xreg.read(rs2)
                     case other:
                         return trap.EXCEPTION.IllegalInstruction
+                logging.info(f"wirte {value}")
                 self.xreg.write(rd, np.uint64(value))
             case 0x37:  # lui
                 value = np.uint64(np.int32(inst & 0xfffff000))
@@ -406,7 +513,6 @@ class Cpu():
                                 dividend = self.xreg.read(rs1)
                                 divisor = self.xreg.read(rs2)
                                 value = dividend / divisor
-                        self.xreg.write(rd, value)
                     case (0x5, 0x20):
                         # sraw
                         value = np.int32(self.xreg.read(rs1)) >> shamt
@@ -420,9 +526,9 @@ class Cpu():
                                 dividend = np.uint32(self.xreg.read(rs1))
                                 divisor = np.uint32(self.xreg.read(rs2))
                                 value = dividend % divisor
-                        self.xreg.write(rd, value)
                     case other:
                         return trap.EXCEPTION.IllegalInstruction
+                logging.info(f"wirte {value}")
                 self.xreg.write(rd, np.uint64(value))
             case 0x63:
                 imm = (np.int32(inst & 0x80000000) >> 19).astype('uint64') |\
@@ -455,9 +561,10 @@ class Cpu():
                     self.pc = np.uint64(self.pc + imm - 4)
             case 0x67:
                 # print("jalr inst******************************")
-                self.xreg.write(rd, self.pc)
+                temp = self.pc
                 imm = np.uint64(np.int32(inst & 0xfff00000) >> 20)
                 self.pc = (np.uint64(self.xreg.read(rs1)) + imm) & np.uint64(~1)
+                self.xreg.write(rd, temp)
             case 0x6f:
                 # print("jal inst******************************")
                 self.xreg.write(rd, self.pc)
@@ -493,7 +600,7 @@ class Cpu():
                                 self.csrs.write(CSR.SSTATUS, self.csrs.read(CSR.SSTATUS) & ~(1 << 8))
                             case (0x2, 0x18):  # mret
                                 self.pc = self.csrs.read(CSR.MEPC)
-                                flag = (self.load_csr(CSR.MSTATUS) >> 11) & 0b11
+                                flag = (int(self.csrs.read(CSR.MSTATUS)) >> 11) & 0b11
                                 match flag:
                                     case 0x2:
                                         self.mode = MODE.MACHINE
@@ -501,12 +608,12 @@ class Cpu():
                                         self.mode = MODE.SUPERVISOR
                                     case other:
                                         self.mode = MODE.USER
-                                flag = (self.csrs.read(CSR.MSTATUS) >> 7) & 1
-                                value = self.csrs.read(CSR.MSTATUS) | (1 << 3) if flag else\
-                                        self.csrd.read(CSR.MSTATUS) & ~(1 << 3)
+                                flag = (int(self.csrs.read(CSR.MSTATUS)) >> 7) & 1
+                                value = int(self.csrs.read(CSR.MSTATUS)) | (1 << 3) if flag else\
+                                        int(self.csrs.read(CSR.MSTATUS)) & ~(1 << 3)
                                 self.csrs.write(CSR.MSTATUS, value)
-                                self.csrs.write(CSR.MSTATUS, self.csrs.read(CSR.MSTATUS) | (1 << 7))
-                                self.csrs.write(CSR.MSTATUS, self.csrs.read(CSR.MSTATUS) & ~(0b11 << 11))
+                                self.csrs.write(CSR.MSTATUS, int(self.csrs.read(CSR.MSTATUS)) | (1 << 7))
+                                self.csrs.write(CSR.MSTATUS, int(self.csrs.read(CSR.MSTATUS)) & ~(0b11 << 11))
                             case (_, 0x9):  # sfence.vma
                                 pass
                             case other:
@@ -515,28 +622,34 @@ class Cpu():
                         temp = self.csrs.read(csr_addr)
                         self.csrs.write(csr_addr, self.xreg.read(rs1))
                         self.xreg.write(rd, temp)
+                        self.update_paging(csr_addr)
                     case 0x2:  # csrrs
                         temp = self.csrs.read(csr_addr)
                         self.csrs.write(csr_addr, temp | self.xreg.read(rs1))
                         self.xreg.write(rd, temp)
+                        self.update_paging(csr_addr)
                     case 0x3:  # csrrc
                         temp = self.csrs.read(csr_addr)
                         self.csrs.write(csr_addr, temp & (~self.xreg.read(rs1)))
                         self.xreg.write(rd, temp)
+                        self.update_paging(csr_addr)
                     case 0x5:  # csrrwi
                         imm = np.uint64(rs1)
                         self.xreg.write(rd, self.csrs.read(csr_addr))
                         self.csrs.write(csr_addr, imm)
+                        self.update_paging(csr_addr)
                     case 0x6:  # csrrsi
                         imm = np.uint64(rs1)
                         temp = self.csrs.read(csr_addr)
                         self.csrs.write(csr_addr, imm | temp)
                         self.xreg.write(rd, temp)
+                        self.update_paging(csr_addr)
                     case 0x7:  # csrrci
                         imm = np.uint64(rs1)
                         temp = self.csrs.read(csr_addr)
                         self.csrs.write(csr_addr, (~imm) &  temp)
                         self.xreg.write(rd, temp)
+                        self.update_paging(csr_addr)
                     case other:
                         return trap.EXCEPTION.IllegalInstruction
             case other:
@@ -556,7 +669,7 @@ class Cpu():
         medeleg = self.csrs.read(CSR.MEDELEG)
         if intr:
             cause = (1 << 63) | cause
-        if (previous_mode.value <= MODE.SUPERVISOR.value) and (medeleg >> cause) & np.uint64(1) != 0:
+        if (previous_mode.value <= MODE.SUPERVISOR.value) and (int(medeleg) >> cause) & 1 != 0:
             # handle trap in s-mode
             self.mode = MODE.SUPERVISOR
 
@@ -564,18 +677,18 @@ class Cpu():
             if intr:
                 stvec = self.csrs.read(CSR.STVEC) & 1
                 vector = 4 * cause if stvec else 0
-                self.pc = (self.csrs.read(CSR.STVEC) & ~1) + vector
+                self.pc = self.csrs.read(CSR.STVEC) & np.uint64(~1) + vector
             else:
-                self.pc = self.csrs.read(CSR.STVEC) & (~1)
+                self.pc = self.csrs.read(CSR.STVEC) & np.uint64(~1)
 
-            self.csrs.write(CSR.SEPC, exception_pc & (~1))
+            self.csrs.write(CSR.SEPC, exception_pc & np.uint64(~1))
             self.csrs.write(CSR.SCAUSE, cause)
             self.csrs.write(CSR.STVAL, 0)
 
             # Set a previous interrupt-enable bit for supervisor mode (SPIE, 5) to the value
             # of a global interrupt-enable bit for supervisor mode (SIE, 1).
             value = 0
-            if (self.csrs.read(CSR.SSTATUS) >> 1) & inp.uint64(1) == 1:
+            if (int(self.csrs.read(CSR.SSTATUS)) >> 1) & 1 == 1:
                 value = self.csrs.read(CSR.SSTATUS) | np.uint64((1 << 5))
             else:
                 value = self.csrs.read(CSR.SSTATUS) & ~np.uint64(1 << 5)
@@ -596,7 +709,7 @@ class Cpu():
 
             # Set the program counter to the machine trap-handler base address (mtvec).
             if intr:
-                stvec = self.csrs.read(CSR.MTVEC) & 1
+                stvec = self.csrs.read(CSR.MTVEC) & np.uint64(1)
                 vector = 4 * cause if stvec else 0
                 self.pc = (self.csrs.read(CSR.MTVEC) & np.uint64(~1)) + vector
             else:
@@ -642,33 +755,38 @@ class Cpu():
         irq = 0
         if self.bus.uart.is_interrupting():
             irq = uart.UART.IRQ.value
-            self.bus.store(bus.PLIC.SCLAIM, 4, irq)
-            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) | MIP.SEIP)
+        elif self.bus.virtio.is_interrupting():
+            self.bus.virtio.disk_access()
+            irq = virtio.VIRTIO.IRQ.value
 
-        pending = self.csrs.read(CSR.MIE) & self.csrs.read(CSR.MIP)
+        if irq:
+            self.bus.store(plic.PLIC.SCLAIM.value, 4, irq)
+            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) | np.uint64(MIP.SEIP.value))
+
+        pending = int(self.csrs.read(CSR.MIE) & self.csrs.read(CSR.MIP))
 
         e  = None
-        if pending & MIP.MEIP != 0:
-            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) & ~MIP.MEIP)
+        if pending & MIP.MEIP.value != 0:
+            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) & np.uint64(~MIP.MEIP.value))
             e = trap.INTERRUPT.MachineExternelInterrupt
-        elif pending & MIP.MSIP != 0:
-            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) & ~MIP.MSIP)
+        elif pending & MIP.MSIP.value != 0:
+            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) & np.uint64(~MIP.MSIP.value))
             e = trap.INTERRUPT.SoftwareInterrupt
-        elif pending & MIP.MTIP != 0:
-            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) & ~MIP.MTIP)
+        elif pending & MIP.MTIP.value != 0:
+            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) & np.uint64(~MIP.MTIP.value))
             e = trap.INTERRUPT.MachineTimerInterrupt
-        elif pending & MIP.SEIP != 0:
-            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) & ~MIP.SEIP)
+        elif pending & MIP.SEIP.value != 0:
+            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) & np.uint64(~MIP.SEIP.value))
             e = trap.INTERRUPT.SupervisorExternalInterrupt
-        elif pending & MIP.SSIP != 0:
-            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) & ~MIP.SSIP)
+        elif pending & MIP.SSIP.value != 0:
+            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) & np.uint64(~MIP.SSIP.value))
             e = trap.INTERRUPT.SupervisorSoftwareInterrupt
-        elif pending & MIP.STIP != 0:
-            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) & ~MIP.STIP)
+        elif pending & MIP.STIP.value != 0:
+            self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) & np.uint64(~MIP.STIP.value))
             e = trap.INTERRUPT.SupervisorTimerInterrupt
 
         if e:
-            return self.handle_trap(e, -4, true)
+            return self.handle_trap(e, -4, True)
 
     def run(self):
         while True:
@@ -680,6 +798,7 @@ class Cpu():
              ret = True
              if isinstance(inst, trap.EXCEPTION):
                  self.handle_trap(inst, 0)
+             logging.info(f"pc {self.pc} {hex(inst)}")
 
 
              self.pc += np.uint64(4)
