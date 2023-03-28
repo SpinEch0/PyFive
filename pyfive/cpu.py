@@ -192,7 +192,7 @@ class Cpu():
         if isinstance(arr, bytes) or isinstance(arr, bytearray):
             if len(arr) < size:
                 return trap.EXCEPTION.LoadAccessFault
-            val = int.from_bytes(arr, byteorder='little', signed=False)
+            val = int.from_bytes(arr, byteorder='little', signed=True)
         return np.uint64(val)
 
     # def sext(self, val, size, bits):
@@ -210,7 +210,7 @@ class Cpu():
         if isinstance(arr, bytes) or isinstance(arr, bytearray):
             if len(arr) < size:
                 return trap.EXCEPTION.LoadAccessFault
-            val = int.from_bytes(arr, byteorder='little', signed=True)
+            val = int.from_bytes(arr, byteorder='little', signed=False)
         return np.uint64(val)
 
     def update_paging(self, csr_addr):
@@ -227,24 +227,29 @@ class Cpu():
         if not self.enable_paging:
             return addr
         addr = int(addr)
+        if addr == 0x800080c0:
+            logging.debug(f"translate va {hex(addr)}")
         levels = 3
         vpn = [(addr >> 12) & 0x1ff,
                (addr >> 21) & 0x1ff,
                (addr >> 30) & 0x1ff]
 
         a = self.page_table
+        # logging.debug(f"pagetable {hex(int(a))}")
         i = levels - 1
         while True:
             pte = self.bus.loaduint(a+vpn[i]*8, 8)
+            if addr == 0x800080c0:
+                logging.debug(f"pte address  {hex(int(a+vpn[i]*8))}")
             if isinstance(pte, trap.EXCEPTION):
                 return pte
             pte = int(pte)
-            logging.debug(f"read pte is {hex(pte)}")
+            # logging.debug(f"read pte is {hex(pte)}")
             v = pte & 1
             r = (pte >> 1) & 1
             w = (pte >> 2) & 1
             x = (pte >> 3) & 1
-            if v == 0 or (r == 0 and w == 0):
+            if i==0 and (v == 0 or (r == 0 and w == 0)):
                 match access_type:
                     case ACCESSTYPE.INSTRUCTION:
                         return trap.EXCEPTION.InstructionPageFault
@@ -256,12 +261,12 @@ class Cpu():
                 break
             i = i - 1
             ppn = (pte >> 10) & 0x0fff_ffff_ffff
-            a = ppn * 4096
+            a = ppn << 12
             if i < 0:
                 match access_type:
                     case ACCESSTYPE.INSTRUCTION:
                         return trap.EXCEPTION.InstructionPageFault
-                    case ACCESSTPYE.LOAD:
+                    case ACCESSTYPE.LOAD:
                         return trap.EXCEPTION.LoadPageFault
                     case ACCESSTYPE.STORE:
                         return trap.EXCEPTION.StoreAMOPAageFault
@@ -272,14 +277,17 @@ class Cpu():
 
         offset = addr & 0xfff
         logging.debug(f"ppn   i offset {hex(ppn[i])}  {i}  {offset}")
+        ret = 0
         match i:
             case 0:
                 ppn = (pte >> 10) & 0x0fff_ffff_ffff
-                return (ppn << 12) | offset
+                ret = (ppn << 12) | offset
             case 1:
-                return ppn[2] << 30 | ppn[1] << 21 | vpn[0] << 12 | offset
+                ret = ppn[2] << 30 | ppn[1] << 21 | vpn[0] << 12 | offset
             case 2:
-                return ppn[2] << 30 | vpn[1] << 21 | vpn[0] << 12 | offset
+                ret = ppn[2] << 30 | vpn[1] << 21 | vpn[0] << 12 | offset
+        # logging.debug(f"pa is {hex(ret)}")
+        return ret
 
     def execute(self, inst) -> bool | trap.EXCEPTION:
         opcode = inst & 0x7f
@@ -303,30 +311,46 @@ class Cpu():
                         # lb, load byte
                         # x[rd] = sext(M[x[rs1] + sext(offset)][7:0])
                         val = self.loadint(addr, 1)
+                        # logging.debug(f"lb addr {hex(addr)}")
                     case 0x1:
                         # lh, load half word
                         val = self.loadint(addr, 2)
+                        # logging.debug(f"lh addr {hex(addr)}")
                     case 0x2:
                         # lw, load word
                         val = self.loadint(addr, 4)
                         # print("load word ", val)
+                        # logging.debug(f"lw addr {hex(addr)}")
                     case 0x3:
                         # ld, load double word
                         val = self.loadint(addr, 8)
+                        # logging.debug(f"ld addr {hex(addr)}")
                     case 0x4:
                         # lbu, load byte unsigned
                         val = self.loaduint(addr, 1)
+                        # logging.debug(f"lbu addr {hex(addr)}")
                     case 0x5:
                         # lhu
                         val = self.loaduint(addr, 2)
+                        # logging.debug(f"lhu addr {hex(addr)}")
                     case 0x6:
                         # lwu
                         val = self.loaduint(addr, 4)
+                        # logging.debug(f"lwu addr {hex(addr)}")
                     case other:
                         # print("UnSupported load inst: {}, funct3({}) is unknown!".format(hex(inst), hex(funct3)))
                         return trap.EXCEPTION.IllegalInstruction
-                logging.info(f"wirte {val}")
+                if isinstance(val, trap.EXCEPTION):
+                    logging.debug(f"wirte {val}, addr {hex(addr)}, funct3 {funct3}")
+                    return val
                 self.xreg.write(rd, val)
+            case 0x0f:  # fence
+                match funct3:
+                    case 0x0:
+                        pass
+                    case other:
+                        logging.debug("fence illegal")
+                        return trap.EXCEPTION.IllegalInstruction
             case 0x13:
                 imm = np.uint64(np.int32(inst&0xfff00000)>>20)
                 shamt = (imm & np.uint64(0x3f))
@@ -335,7 +359,8 @@ class Cpu():
                     case 0x0:
                         # addi
                         value = np.uint64(self.xreg.read(rs1) + imm)
-                        # print('addi immis value ',hex(imm), hex(value))
+                        # if imm == 0:
+                        #     logging.debug(f'addi imm is {hex(imm)}, rs1 is {hex(self.xreg.read(rs1))} value: {hex(value)}')
                     case 0x1:
                         # slli
                         value = self.xreg.read(rs1) << shamt
@@ -353,18 +378,18 @@ class Cpu():
                             case 0x00:
                                 value = self.xreg.read(rs1) >> shamt
                             case 0x10:
-                                value = self.xreg.read(rs1).astype('int64') >> shamt
+                                value = int(self.xreg.read(rs1)) >> int(shamt)
                             case other:
                                 # print("Unsupport inst", hex(inst))
                                 return trap.EXCEPTION.IllegalInstruction
                     case 0x6:
-                        value = self.xreg.read(rs1) | imm
+                        value = self.xreg.read(rs1) | imm  # ori
                     case 0x7:
-                        value = self.xreg.read(rs1) & imm
+                        value = self.xreg.read(rs1) & imm  # andi
                     case other:
                         print("Unsupport inst", hex(inst))
                         return trap.EXCEPTION.IllegalInstruction
-                logging.info(f"wirte {value}")
+                logging.debug(f"wirte {hex(value)}")
                 self.xreg.write(rd, np.uint64(value))
             case 0x17:  # auipc
                 # print("auipc*************************")
@@ -384,16 +409,16 @@ class Cpu():
                     case 0x5:
                         match funct7:
                             case 0x00:
-                                value = (self.xreg.read(rs1).astype('uint32')) >> shamt
+                                value = int(self.xreg.read(rs1).astype('uint32')) >> int(shamt)
                             case 0x20:
-                                value = (self.xreg.read(rs1).astype('int32')) >> shamt
+                                value = int(self.xreg.read(rs1).astype('int32')) >> int(shamt)
                             case other:
                                 print("Unsupport inst", hex(inst))
                                 return trap.EXCEPTION.IllegalInstruction
                     case other:
                         print("Unsupport inst", hex(inst))
                         return trap.EXCEPTION.IllegalInstruction
-                logging.info(f"wirte {value}")
+                logging.debug(f"wirte {value}")
                 self.xreg.write(rd, np.uint64(value))
             case 0x23:  # store
                 imm = np.uint64((np.int32(inst & 0xfe000000) >> 20)) |\
@@ -404,17 +429,16 @@ class Cpu():
                 # print(rs2, self.xreg.read(rs2))
                 # print(type(self.xreg.read(rs2)))
                 value = np.uint64(self.xreg.read(rs2))
-                # 8 is not ok
                 vbytes = value.tobytes()
                 match funct3:
                     case 0x0:
-                        self.store(addr, 1, vbytes[0:1])
+                        self.store(addr, 1, vbytes[0:1])  # sb
                     case 0x1:
-                        self.store(addr, 2, vbytes[0:2])
+                        self.store(addr, 2, vbytes[0:2])  # sh
                     case 0x2:
-                        self.store(addr, 4, vbytes[0:4])
+                        self.store(addr, 4, vbytes[0:4])  # sw
                     case 0x3:
-                        self.store(addr, 8, vbytes[0:8])
+                        self.store(addr, 8, vbytes[0:8])  # sd
                     case other:
                         return trap.EXCEPTION.IllegalInstruction
             case 0x2f:  # rv64a
@@ -460,8 +484,10 @@ class Cpu():
                     case (0x0, 0x20):  # sub
                         value = self.xreg.read(rs1) - self.xreg.read(rs2)
                     case (0x1, 0x00):  # sll
+                        logging.debug(f"sll rs1 {self.xreg.read(rs1)}   shamt {shamt}")
                         value = self.xreg.read(rs1) << shamt
                     case (0x2, 0x00):  # slt
+                        logging.debug(f"slt rs1 {self.xreg.read(rs1)}   shamt {shamt}")
                         cond = np.int64(self.xreg.read(rs1)) < np.int64(self.xreg.read(rs2))
                         value = 1 if cond else 0
                     case (0x3, 0x00):  # sltu
@@ -470,16 +496,19 @@ class Cpu():
                     case (0x4, 0x00):  # xor
                         value = self.xreg.read(rs1) ^ self.xreg.read(rs2)
                     case (0x5, 0x00):  # srl
-                        value = self.xreg.read(rs1) << shamt
+                        logging.debug(f"srl rs1 {hex(self.xreg.read(rs1))}   shamt {shamt}")
+                        value = self.xreg.read(rs1) >> shamt
                     case (0x5, 0x20):  # sra
-                        value = np.int64(self.xreg.read(rs1)) << shamt
+                        logging.debug(f"sra rs1 {hex(self.xreg.read(rs1))}   shamt {shamt}")
+                        value = np.int64(self.xreg.read(rs1)) >> shamt
                     case (0x6, 0x00):  # or
                         value = self.xreg.read(rs1) | self.xreg.read(rs2)
+                        # logging.debug(f"or  {hex(self.xreg.read(rs1))}   {hex(self.xreg.read(rs2))} rd is {hex(rd)}")
                     case (0x7, 0x00):  # and
                         value = self.xreg.read(rs1) & self.xreg.read(rs2)
                     case other:
                         return trap.EXCEPTION.IllegalInstruction
-                logging.info(f"wirte {value}")
+                logging.debug(f"wirte {value}")
                 self.xreg.write(rd, np.uint64(value))
             case 0x37:  # lui
                 value = np.uint64(np.int32(inst & 0xfffff000))
@@ -497,9 +526,11 @@ class Cpu():
                         value = np.int32(self.xreg.read(rs1) -  self.xreg.read(rs2))
                     case (0x1, 0x00):
                         # sllw
+                        logging.debug(f"sllw rs1 {self.xreg.read(rs1)}   shamt {shamt}")
                         value = np.uint32(self.xreg.read(rs1)) << shamt
                     case (0x5, 0x00):
                         # srlw
+                        logging.debug(f"srlw rs1 {self.xreg.read(rs1)}   shamt {shamt}")
                         value = np.uint32(self.xreg.read(rs1)) >> shamt
                     case (0x5, 0x01):
                         # divu
@@ -512,7 +543,7 @@ class Cpu():
                             case other:
                                 dividend = self.xreg.read(rs1)
                                 divisor = self.xreg.read(rs2)
-                                value = dividend / divisor
+                                value = np.uint64(dividend / divisor)
                     case (0x5, 0x20):
                         # sraw
                         value = np.int32(self.xreg.read(rs1)) >> shamt
@@ -525,10 +556,10 @@ class Cpu():
                             case other:
                                 dividend = np.uint32(self.xreg.read(rs1))
                                 divisor = np.uint32(self.xreg.read(rs2))
-                                value = dividend % divisor
+                                value = np.uint64(dividend % divisor)
                     case other:
                         return trap.EXCEPTION.IllegalInstruction
-                logging.info(f"wirte {value}")
+                logging.debug(f"wirte {value}")
                 self.xreg.write(rd, np.uint64(value))
             case 0x63:
                 imm = (np.int32(inst & 0x80000000) >> 19).astype('uint64') |\
@@ -542,6 +573,7 @@ class Cpu():
                         cond = self.xreg.read(rs1) == self.xreg.read(rs2)
                     case 0x1:
                         # bne
+                        logging.debug(f"rs1 {self.xreg.read(rs1)}, rs2 {self.xreg.read(rs2)}")
                         cond = self.xreg.read(rs1) != self.xreg.read(rs2)
                     case 0x4:
                         # blt
@@ -579,6 +611,7 @@ class Cpu():
                     case 0x0:
                         match (rs2, funct7):
                             case (0x0, 0x0):  # ecall
+                                logging.debug(f"ecall from {self.mode}")
                                 match self.mode:
                                     case MODE.MACHINE:
                                         return trap.EXCEPTION.EnvironmentCallFromMMode
@@ -589,15 +622,16 @@ class Cpu():
                             case (0x1, 0x0):  # ebreak
                                 return trap.EXCEPTION.Breakpoint
                             case (0x2, 0x8):  # sret
+                                logging.debug(f"sret old pc is {hex(self.pc)}, new pc is {hex(self.csrs.read(CSR.SEPC))}")
                                 self.pc = self.csrs.read(CSR.SEPC)
-                                flag = (self.csrs.read(CSR.SSTATUS) >> 8) & 1
+                                flag = int(self.csrs.read(CSR.SSTATUS)) >> 8 & 1
                                 self.mode = MODE.SUPERVISOR if flag else MODE.USER
-                                flag = (self.csrs.read(CSR.SSTATUS) >> 5) & 1
-                                value = self.csrs.read(CSR.SSTSTUS) | (1 << 1) if flag else\
-                                        self.csrs.read(CSR.SSTATUS) & ~(1 << 1)
+                                flag = int(self.csrs.read(CSR.SSTATUS)) >> 5 & 1
+                                value = self.csrs.read(CSR.SSTATUS) | np.uint64(1 << 1) if flag else\
+                                        self.csrs.read(CSR.SSTATUS) & np.uint64(~(1 << 1))
                                 self.csrs.write(CSR.SSTATUS, value)
-                                self.csrs.write(CSR.SSTATUS, self.csrs.read(CSR.SSTATUS) | (1 << 5))
-                                self.csrs.write(CSR.SSTATUS, self.csrs.read(CSR.SSTATUS) & ~(1 << 8))
+                                self.csrs.write(CSR.SSTATUS, self.csrs.read(CSR.SSTATUS) | np.uint64((1 << 5)))
+                                self.csrs.write(CSR.SSTATUS, self.csrs.read(CSR.SSTATUS) & np.uint64(~(1 << 8)))
                             case (0x2, 0x18):  # mret
                                 self.pc = self.csrs.read(CSR.MEPC)
                                 flag = (int(self.csrs.read(CSR.MSTATUS)) >> 11) & 0b11
@@ -659,6 +693,7 @@ class Cpu():
 
     def dump_regs(self):
         print("=====================pc===================", hex(self.pc))
+        print("machine mode:", self.mode)
         self.xreg.dump()
         self.csrs.dump()
 
@@ -669,15 +704,16 @@ class Cpu():
         medeleg = self.csrs.read(CSR.MEDELEG)
         if intr:
             cause = (1 << 63) | cause
-        if (previous_mode.value <= MODE.SUPERVISOR.value) and (int(medeleg) >> cause) & 1 != 0:
+        if (previous_mode.value <= MODE.SUPERVISOR.value) and (int(medeleg) >> int(np.uint32(cause))) & 1 != 0:
+            logging.debug("handle trap in supervisor")
             # handle trap in s-mode
             self.mode = MODE.SUPERVISOR
 
             # Set the program counter to the supervisor trap-handler base address (stvec).
             if intr:
-                stvec = self.csrs.read(CSR.STVEC) & 1
+                stvec = self.csrs.read(CSR.STVEC) & np.uint64(1)
                 vector = 4 * cause if stvec else 0
-                self.pc = self.csrs.read(CSR.STVEC) & np.uint64(~1) + vector
+                self.pc = self.csrs.read(CSR.STVEC) & np.uint64(~1) + np.uint64(vector)
             else:
                 self.pc = self.csrs.read(CSR.STVEC) & np.uint64(~1)
 
@@ -704,6 +740,7 @@ class Cpu():
                 value = self.csrs.read(CSR.SSTATUS) | np.uint64(1 << 8)
             self.csrs.write(CSR.SSTATUS, value)
         else:
+            logging.debug("handle trap in machine")
             # handle trap in machine mode
             self.mode = MODE.MACHINE
 
@@ -760,12 +797,13 @@ class Cpu():
             irq = virtio.VIRTIO.IRQ.value
 
         if irq:
-            self.bus.store(plic.PLIC.SCLAIM.value, 4, irq)
+            logging.debug(f"handle irq {irq}")
+            self.bus.plic.store(plic.PLIC.SCLAIM.value, 4, irq)
             self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) | np.uint64(MIP.SEIP.value))
 
         pending = int(self.csrs.read(CSR.MIE) & self.csrs.read(CSR.MIP))
 
-        e  = None
+        e = None
         if pending & MIP.MEIP.value != 0:
             self.csrs.write(CSR.MIP, self.csrs.read(CSR.MIP) & np.uint64(~MIP.MEIP.value))
             e = trap.INTERRUPT.MachineExternelInterrupt
@@ -797,13 +835,19 @@ class Cpu():
              inst = self.fetch()
              ret = True
              if isinstance(inst, trap.EXCEPTION):
+                 logging.debug(inst)
                  self.handle_trap(inst, 0)
-             logging.info(f"pc {self.pc} {hex(inst)}")
+             else:
+                 logging.debug(f"pc {hex(self.pc)} {hex(inst)}")
 
 
+             # if self.pc >= 0x80003e7c and self.pc <= 0x80003e9c:
+             #     logging.debug(f"pc {hex(self.pc)}, inst {hex(inst)}")
+             #     self.dump_regs()
              self.pc += np.uint64(4)
              ret = self.execute(inst)
              if isinstance(ret, trap.EXCEPTION):
+                 logging.debug(f"exception inst {hex(inst)}")
                  self.handle_trap(ret, -4)
 
              self.handle_intr()

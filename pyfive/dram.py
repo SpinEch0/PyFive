@@ -1,3 +1,6 @@
+import logging
+import numpy as np
+
 class Memory():
     def __init__(self, size, dram_bin):
         self.ram = bytearray(size)
@@ -10,10 +13,16 @@ class Memory():
 
     def load(self, addr, size):
         addr = int(addr)
-        return self.ram[addr:addr+size] 
+        # if addr == 0x3ff010:
+        #     logging.info(f"load {self.ram[addr:addr+size]}")
+        return self.ram[addr:addr+size]
 
     def store(self, addr, size, data):
         addr = int(addr)
-        self.ram[addr:addr+size] = data
-        return True 
+        if addr == 0x3ff010:
+            logging.info(f"store {data}")
+        if isinstance(data, int) or isinstance(data, np.uint64):
+            data = np.uint64(data).tobytes()
+        self.ram[addr:addr+size] = data[:size]
+        return True
 

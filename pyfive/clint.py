@@ -4,6 +4,7 @@
 
 import numpy as np
 from enum import Enum
+import logging
 
 # The address of a mtimecmp register starts. A mtimecmp is a dram mapped machine mode timer
 # compare register, used to trigger an interrupt when mtimecmp is greater than or equal to mtime.
@@ -18,6 +19,8 @@ class Clint():
         self.mtimecmp = np.uint64(0)
 
     def load64(self, addr):
+        logging.debug(f"load clint addr {hex(addr)}")
+        addr = CLINT(addr)
         match addr:
             case CLINT.MTIMECMP:
                 return self.mtimecmp
@@ -27,6 +30,8 @@ class Clint():
                 return np.uint64(0)
 
     def store64(self, addr, value):
+        logging.debug(f"store clint addr {hex(addr)}")
+        addr = CLINT(addr)
         match addr:
             case CLINT.MTIMECMP:
                 self.mtimecmp = np.uint64(value)

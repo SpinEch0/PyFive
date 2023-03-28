@@ -38,6 +38,7 @@ class Uart():
         self.cond = threading.Condition()
         self.thread = threading.Thread(target=keyboard_thread,
                                        args=(self,))
+        self.regs[UART.LSR.value] |= np.uint64(UART.LSR_TX.value)
         self.intr = False
         self.mutex = threading.Lock()
         self.thread.setDaemon(True)

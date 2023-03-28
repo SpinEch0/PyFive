@@ -6,6 +6,7 @@
 
 import numpy as np
 from enum import Enum
+import logging
 
 class PLIC(Enum):
     PENDING = 0x1000
@@ -21,7 +22,8 @@ class Plic():
         self.sclaim = np.uint32(0)
 
     def load32(self, addr):
-        match addr:
+        logging.debug(f"plic load {hex(addr)}")
+        match PLIC(addr):
             case PLIC.PENDING:
                 return self.pending
             case PLIC.SENABLE:
@@ -31,26 +33,31 @@ class Plic():
             case PLIC.SCLAIM:
                 return self.sclaim
             case other:
+                logging.debug(f"plic load other {hex(addr)}")
                 return np.uint32(0)
 
     def store32(self, addr, value):
+        logging.debug(f"plic store {hex(addr)} val{value}")
         match addr:
-            case PLIC.PENDING:
+            case PLIC.PENDING.value:
                 self.pending = np.uint32(value)
-            case PLIC.SENABLE:
+            case PLIC.SENABLE.value:
                 self.senable = np.uint32(value)
-            case PLIC.SPRIORITY:
+            case PLIC.SPRIORITY.value:
                 self.spriority = np.uint32(value)
-            case PLIC.SCLAIM:
+            case PLIC.SCLAIM.value:
                 self.sclaim = np.uint32(value)
+            case other:
+                logging.debug("plic write some regs")
 
     def load(self, addr, size):
         if size != 4:
             raise("loading plic size is not 4")
-        return self.load32(addr).to_bytes(4, byteorder='little', singed='False')
+        return int(self.load32(addr)).to_bytes(4, byteorder='little', signed=False)
 
     def store(self, addr, size, data):
         if size != 4:
             raise("storing plic size is not 4")
-        val = int.from_bytes(data, byteorder='little', signed=False)
-        self.store32(addr, val)
+        if isinstance(data, bytes) or isinstance(data, bytearray):
+            data = int.from_bytes(data, byteorder='little', signed=False)
+        self.store32(addr, data)

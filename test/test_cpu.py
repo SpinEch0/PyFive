@@ -68,6 +68,9 @@ class TestCpu():
         data = self.mycpu.loadint(bus.DRAM_BASE + 12, 4)
         assert(data == 0)
 
+        self.store_dram(0xffff_ffef_5dc3_f329, 1024)
+        data = self.mycpu.loadint(bus.DRAM_BASE+4, 4)
+        assert(data == 0xffff_ffff_ffff_ffef)
 
     def test_cpu_loaduint(self):
         self.store_dram(0xffff_ffef_5dc3_f329, 1024)
@@ -75,4 +78,4 @@ class TestCpu():
         assert(data == 0x5dc3_f329)
 
         data = self.mycpu.loaduint(bus.DRAM_BASE+4, 4)
-        assert(data == 0xffff_ffff_ffff_ffef)
+        assert(data == 0xffff_ffef)
