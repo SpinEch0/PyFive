@@ -828,10 +828,7 @@ class Cpu():
 
     def run(self):
         while True:
-             # if self.pc == 0:
-             #     print("stop with addr 0 inst")
-             #     self.dump_regs()
-             #     break
+
              inst = self.fetch()
              ret = True
              if isinstance(inst, trap.EXCEPTION):
@@ -840,12 +837,9 @@ class Cpu():
              else:
                  logging.debug(f"pc {hex(self.pc)} {hex(inst)}")
 
-
-             # if self.pc >= 0x80003e7c and self.pc <= 0x80003e9c:
-             #     logging.debug(f"pc {hex(self.pc)}, inst {hex(inst)}")
-             #     self.dump_regs()
              self.pc += np.uint64(4)
              ret = self.execute(inst)
+
              if isinstance(ret, trap.EXCEPTION):
                  logging.debug(f"exception inst {hex(inst)}")
                  self.handle_trap(ret, -4)

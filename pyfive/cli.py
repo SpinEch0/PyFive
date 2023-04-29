@@ -20,7 +20,12 @@ def handler(*args):
 def main(argv: List[str] = None) -> int:
     global emu
     signal.signal(signal.SIGINT, handler)
-    mybus = bus.Bus(dram_bin="kernel", disk_bin="../xv6-riscv/fs.img")
+    if len(argv) > 2:
+        mybus = bus.Bus(dram_bin=argv[1], disk_bin=argv[2])
+    elif len(argv) > 1:
+        mybus = bus.Bus(dram_bin=argv[1])
+    else:
+        logging.fatal("dram_bin must be specified!")
     emu = cpu.Cpu(mybus)
     emu.run()
 if __name__ == "__main__":
